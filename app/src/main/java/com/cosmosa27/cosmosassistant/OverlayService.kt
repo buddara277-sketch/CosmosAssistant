@@ -101,11 +101,11 @@ class OverlayService : Service() {
     private fun showTextEntry() {
         val container = FrameLayout(this)
         val edit = EditText(this).apply {
-            hint = "Напиши команду…"
-            textSize = 17f
-            singleLine = true
-            setPadding(dp(16), dp(12), dp(16), dp(12))
-        }
+    hint = "Напиши команду…"
+    textSize = 17f
+    setSingleLine(true)
+    setPadding(dp(16), dp(12), dp(16), dp(12))
+}
         val panel = LinearLayoutCompat(this)
         panel.orientation = android.widget.LinearLayout.HORIZONTAL
         panel.setPadding(dp(12), dp(8), dp(8), dp(8))
