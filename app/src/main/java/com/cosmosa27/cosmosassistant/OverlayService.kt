@@ -1,3 +1,4 @@
+
 package com.cosmosa27.cosmosassistant
 
 import android.app.*
@@ -58,6 +59,9 @@ class OverlayService : Service(), TextToSpeech.OnInitListener {
         startForeground(1, notification)
         windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
         showOrb()
+
+        // Загружаем ранее выбранную модель Qwen
+        QwenAssistant.loadSaved(this)
     }
 
     override fun onInit(status: Int) {
@@ -164,9 +168,11 @@ class OverlayService : Service(), TextToSpeech.OnInitListener {
         scheduleDim()
     }
 
+    // Передаём команду Qwen и озвучиваем его ответ
     private fun runCommand(command: String) {
-        val response = AssistantEngine.execute(this, command)
-        if (response.isNotBlank()) speak(response)
+        QwenAssistant.ask(this, command) { response ->
+            if (response.isNotBlank()) speak(response)
+        }
     }
 
     private fun speak(text: String) {
