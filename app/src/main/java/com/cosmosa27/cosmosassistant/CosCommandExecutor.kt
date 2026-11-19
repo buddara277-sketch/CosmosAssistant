@@ -5,6 +5,7 @@ import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.provider.Settings
+import android.provider.AlarmClock
 
 object CosCommandExecutor {
 
@@ -90,10 +91,10 @@ object CosCommandExecutor {
                 scroll(context, false)
 
             text.startsWith("нажми кнопку ") ->
-                clickText(context, original.substringAfter("нажми кнопку ", ignoreCase = true))
+                clickText(context, original.substringAfterIgnoreCase("нажми кнопку "))
 
             text.startsWith("нажми ") ->
-                clickText(context, original.substringAfter("нажми ", ignoreCase = true))
+                clickText(context, original.substringAfterIgnoreCase("нажми "))
 
             text.startsWith("введи текст ") ->
                 enterText(context, original)
@@ -113,35 +114,35 @@ object CosCommandExecutor {
             ) || text.startsWith("найди ") -> {
                 val query = when {
                     text.startsWith("найди в интернете ") ->
-                        original.substringAfter("найди в интернете ", ignoreCase = true)
+                        original.substringAfterIgnoreCase("найди в интернете ")
                     text.startsWith("поищи в интернете ") ->
-                        original.substringAfter("поищи в интернете ", ignoreCase = true)
+                        original.substringAfterIgnoreCase("поищи в интернете ")
                     text.startsWith("поищи в сети ") ->
-                        original.substringAfter("поищи в сети ", ignoreCase = true)
+                        original.substringAfterIgnoreCase("поищи в сети ")
                     text.startsWith("найди в сети ") ->
-                        original.substringAfter("найди в сети ", ignoreCase = true)
+                        original.substringAfterIgnoreCase("найди в сети ")
                     text.startsWith("загугли ") ->
-                        original.substringAfter("загугли ", ignoreCase = true)
+                        original.substringAfterIgnoreCase("загугли ")
                     text.startsWith("поищи ") ->
-                        original.substringAfter("поищи ", ignoreCase = true)
+                        original.substringAfterIgnoreCase("поищи ")
                     else ->
-                        original.substringAfter("найди ", ignoreCase = true)
+                        original.substringAfterIgnoreCase("найди ")
                 }
 
                 searchInternet(context, query)
             }
 
             text.startsWith("открой ссылку ") ->
-                openLink(context, original.substringAfter("открой ссылку ", ignoreCase = true))
+                openLink(context, original.substringAfterIgnoreCase("открой ссылку "))
 
             text.startsWithAny("покажи на карте ", "найди на карте ", "открой карту и найди ") -> {
                 val place = when {
                     text.startsWith("покажи на карте ") ->
-                        original.substringAfter("покажи на карте ", ignoreCase = true)
+                        original.substringAfterIgnoreCase("покажи на карте ")
                     text.startsWith("найди на карте ") ->
-                        original.substringAfter("найди на карте ", ignoreCase = true)
+                        original.substringAfterIgnoreCase("найди на карте ")
                     else ->
-                        original.substringAfter("открой карту и найди ", ignoreCase = true)
+                        original.substringAfterIgnoreCase("открой карту и найди ")
                 }
                 openMap(context, place)
             }
@@ -156,20 +157,20 @@ object CosCommandExecutor {
             // ЧАСЫ
 
             text in listOf("открой будильник", "открой часы", "запусти часы", "покажи будильник") ->
-                openCategory(context, Intent.CATEGORY_APP_CLOCK, "часы")
+                openSystemScreen(context, AlarmClock.ACTION_SHOW_ALARMS, "часы")
 
             // ПРИЛОЖЕНИЯ
 
             text.startsWithAny("открой приложение ", "запусти приложение ") -> {
-                val name = original.substringAfter("приложение ", ignoreCase = true)
+                val name = original.substringAfterIgnoreCase("приложение ")
                 openApp(context, name)
             }
 
             text.startsWith("запусти ") ->
-                openApp(context, original.substringAfter("запусти ", ignoreCase = true))
+                openApp(context, original.substringAfterIgnoreCase("запусти "))
 
             text.startsWith("открой ") -> {
-                val name = original.substringAfter("открой ", ignoreCase = true).trim()
+                val name = original.substringAfterIgnoreCase("открой ").trim()
                 if (name.isNotBlank()) openApp(context, name) else null
             }
 
@@ -397,6 +398,11 @@ object CosCommandExecutor {
         }
     }
 
+
+    private fun String.substringAfterIgnoreCase(delimiter: String): String {
+        val index = indexOf(delimiter, ignoreCase = true)
+        return if (index < 0) this else substring(index + delimiter.length)
+    }
     private fun String.removePrefixIgnoreCase(prefix: String): String =
         if (startsWith(prefix, ignoreCase = true)) substring(prefix.length) else this
 
