@@ -24,6 +24,11 @@ object QwenAssistant {
     private const val HISTORY_KEY = "chat_history"
     private const val MODEL_FILE = "qwen-model.gguf"
 
+    private const val CONTEXT_SIZE = 1024
+    private const val CPU_THREADS = 4
+    private const val MAX_RESPONSE_TOKENS = 96
+    private const val MAX_HISTORY_MESSAGES = 6
+
     private val executor = Executors.newSingleThreadExecutor()
     private val mainHandler = Handler(Looper.getMainLooper())
 
@@ -39,21 +44,20 @@ object QwenAssistant {
     private val history = mutableListOf<ChatMessage>()
 
     private val systemPrompt = """
-        Ты Cosmos — персональный голосовой помощник пользователя.
-        Общайся на русском языке, естественно, спокойно и дружелюбно.
-        Понимай обычную разговорную речь и учитывай контекст диалога.
-        Если задача непонятна, задай один короткий уточняющий вопрос.
-        Не утверждай, что выполнил действие, если оно фактически не было выполнено.
-        Пока ты работаешь в режиме диалога и не можешь самостоятельно нажимать
-        кнопки телефона или управлять приложениями.
-        Отвечай понятно и без лишней воды.
+        Ты Космос — персональный голосовой помощник.
+        Всегда говори по-русски, естественно и дружелюбно.
+        Отвечай кратко, обычно одним-двумя предложениями.
+        Не рассуждай вслух и не добавляй лишних объяснений.
+        Если команда непонятна, задай один короткий вопрос.
+        Не утверждай, что выполнил действие, если оно не выполнено.
+        Ты можешь помогать с планированием и пониманием команд.
     """.trimIndent()
 
     fun isReady(): Boolean = engine != null
 
     fun isLoading(): Boolean = loading
 
-    // Первоначальный импорт модели из выбранного файла.
+    // Импорт выбранной GGUF-модели.
     fun importAndLoad(
         context: Context,
         uri: Uri,
@@ -111,11 +115,10 @@ object QwenAssistant {
                     throw Exception("Файл модели пустой")
                 }
 
-                // Проверяем, что выбранный файл действительно GGUF.
                 val metadata = LlamaEngine.readMetadata(temporary.absolutePath)
                     ?: throw Exception("Файл не распознан как GGUF-модель")
 
-                // Только после проверки заменяем предыдущую модель.
+                // Проверка пройдена. Заменяем предыдущую модель.
                 if (destination.exists() && !destination.delete()) {
                     throw Exception("Не удалось заменить предыдущую модель")
                 }
@@ -135,14 +138,14 @@ object QwenAssistant {
                 callbackOnMain(
                     callback,
                     true,
-                    "Qwen загружена. Архитектура: ${metadata.architecture}, формат: ${metadata.quantLabel}"
+                    "Модель загружена. Архитектура: ${metadata.architecture}, формат: ${metadata.quantLabel}"
                 )
 
             } catch (e: Exception) {
                 callbackOnMain(
                     callback,
                     false,
-                    "Ошибка загрузки Qwen: ${e.message ?: "неизвестная ошибка"}"
+                    "Ошибка загрузки модели: ${e.message ?: "неизвестная ошибка"}"
                 )
             } finally {
                 loading = false
@@ -150,7 +153,7 @@ object QwenAssistant {
         }
     }
 
-    // Загрузка уже сохранённой модели.
+    // Загрузка ранее сохранённой модели.
     fun loadSaved(
         context: Context,
         callback: ((Boolean, String) -> Unit)? = null
@@ -160,7 +163,7 @@ object QwenAssistant {
 
         if (engine != null) {
             callback?.let {
-                callbackOnMain(it, true, "Qwen уже готова")
+                callbackOnMain(it, true, "Космос готов к работе")
             }
             return
         }
@@ -177,7 +180,7 @@ object QwenAssistant {
 
         if (path.isNullOrBlank()) {
             callback?.let {
-                callbackOnMain(it, false, "Модель Qwen ещё не выбрана")
+                callbackOnMain(it, false, "Модель ещё не выбрана")
             }
             return
         }
@@ -195,7 +198,7 @@ object QwenAssistant {
                 loadModelInternal(path)
 
                 callback?.let {
-                    callbackOnMain(it, true, "Qwen готова к работе")
+                    callbackOnMain(it, true, "Космос готов к работе")
                 }
 
             } catch (e: Exception) {
@@ -203,7 +206,7 @@ object QwenAssistant {
                     callbackOnMain(
                         it,
                         false,
-                        "Не удалось загрузить Qwen: ${e.message ?: "ошибка"}"
+                        "Не удалось загрузить модель: ${e.message ?: "ошибка"}"
                     )
                 }
             } finally {
@@ -229,10 +232,10 @@ object QwenAssistant {
             newEngine.load(
                 path = path,
                 nGpuLayers = 0,
-                nCtx = 2048,
-                nThreads = 0,
+                nCtx = CONTEXT_SIZE,
+                nThreads = CPU_THREADS,
                 kvCacheType = "q8_0",
-                nBatch = 512,
+                nBatch = 256,
                 nUbatch = 128
             )
 
@@ -307,7 +310,7 @@ object QwenAssistant {
                 val count = currentEngine.completion(
                     prompt = prompt,
                     params = SamplingParams(
-                        nPredict = 256,
+                        nPredict = MAX_RESPONSE_TOKENS,
                         temperature = 0.7f,
                         topK = 30,
                         topP = 0.85f,
@@ -336,8 +339,7 @@ object QwenAssistant {
                     history.add(ChatMessage("user", cleanQuestion))
                     history.add(ChatMessage("assistant", answer))
 
-                    // Ограничиваем историю, чтобы не перегружать память.
-                    while (history.size > 12) {
+                    while (history.size > MAX_HISTORY_MESSAGES) {
                         history.removeAt(0)
                     }
 
@@ -349,13 +351,13 @@ object QwenAssistant {
             } catch (e: Exception) {
                 callbackOnMain(
                     callback,
-                    "Не удалось получить ответ Qwen: ${e.message ?: "ошибка"}"
+                    "Не удалось получить ответ: ${e.message ?: "ошибка"}"
                 )
             }
         }
     }
 
-    // Очистка истории диалога.
+    // Очистка истории.
     fun clearHistory(context: Context) {
         synchronized(history) {
             history.clear()
@@ -368,7 +370,7 @@ object QwenAssistant {
         }
     }
 
-    // Восстановление переписки после перезапуска приложения.
+    // Восстановление истории.
     private fun loadHistory() {
         val ctx = appContext ?: return
 
@@ -400,7 +402,7 @@ object QwenAssistant {
         }
     }
 
-    // Сохранение переписки.
+    // Сохранение истории.
     private fun saveHistory() {
         val ctx = appContext ?: return
 
