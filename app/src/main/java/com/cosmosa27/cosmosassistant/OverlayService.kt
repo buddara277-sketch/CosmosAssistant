@@ -263,7 +263,7 @@ private class OrbView(context: Context) : View(context) {
         for (i in 0..5) {
             val a = Math.toRadians((phase + i*60).toDouble())
             paint.color = Color.argb(170, 120,230,255)
-            canvas.drawCircle(cx + kotlin.math.cos(a).toFloat()*r*1.22f, cy + kotlin.math.sin(a).toFloat()*r*1.22f, dp(1.6f).toFloat(), paint)
+            canvas.drawCircle(cx + kotlin.math.cos(a).toFloat()*r*1.22f, cy + kotlin.math.sin(a).toFloat()*r*1.22f, 1.6f * resources.displayMetrics.density, paint)
         }
     }
     private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
