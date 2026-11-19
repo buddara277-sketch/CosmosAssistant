@@ -57,9 +57,12 @@ jobs:
         run: |
           bash scripts/bootstrap.sh
           bash scripts/build-opencl.sh
-      - name: Fix llama.kt Kotlin plugin
+
+      - name: Fix llama.kt Kotlin plugin and Android dependencies
         run: |
           sed -i '1c\plugins {\n    id("com.android.library")\n    id("org.jetbrains.kotlin.android")\n}' libs/llama.kt/llama-kt/build.gradle.kts
+          sed -i 's/kotlinx-coroutines-core:1.11.0/kotlinx-coroutines-android:1.11.0/' libs/llama.kt/llama-kt/build.gradle.kts
+
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
