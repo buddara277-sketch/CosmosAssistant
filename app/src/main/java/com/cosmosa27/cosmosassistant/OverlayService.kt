@@ -538,18 +538,24 @@ class OverlayService : Service(), TextToSpeech.OnInitListener {
         }
 
         commandInProgress = true
-        commandSession++
+        val currentCommandSession = ++commandSession
 
         try {
-            val response = CosCommandExecutor.execute(this, command)
-                ?: "Не понял команду. Попробуй сказать иначе."
+            CosCommandExecutor.executeSequence(this, command) { result ->
+                handler.post {
+                    if (destroyed || currentCommandSession != commandSession) {
+                        return@post
+                    }
 
-            commandInProgress = false
-            speak(response)
-
+                    commandInProgress = false
+                    speak(result)
+                }
+            }
         } catch (_: Exception) {
-            commandInProgress = false
-            speak("Не удалось выполнить команду.")
+            if (currentCommandSession == commandSession) {
+                commandInProgress = false
+                speak("Не удалось выполнить команду.")
+            }
         }
     }
     // ---------------------------------------------------------

@@ -5,6 +5,9 @@ import android.Manifest
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.os.Handler
+import android.os.Looper
+import android.os.SystemClock
 import android.media.AudioManager
 import android.net.Uri
 import android.provider.Settings
@@ -13,6 +16,338 @@ import android.provider.ContactsContract
 import android.view.KeyEvent
 
 object CosCommandExecutor {
+
+    private sealed class AutomationStep {
+        data class OpenApp(val name: String) : AutomationStep()
+        data class ClickAny(val targets: List<String>, val description: String) : AutomationStep()
+        data class Search(val query: String) : AutomationStep()
+    }
+
+    /**
+     * Выполняет простую цепочку действий в приложении.
+     * Обычные одиночные команды по-прежнему обрабатываются методом execute().
+     */
+    fun executeSequence(
+        context: Context,
+        command: String,
+        onComplete: (String) -> Unit
+    ) {
+        val steps = parseAutomationSteps(command)
+
+        if (steps == null || steps.size < 2) {
+            onComplete(
+                execute(context, command)
+                    ?: "Не понял команду. Попробуй сказать иначе."
+            )
+            return
+        }
+
+        val openStep = steps.first() as? AutomationStep.OpenApp
+        if (openStep == null) {
+            onComplete("Не удалось определить приложение для этой последовательности.")
+            return
+        }
+
+        val launch = launchApp(context, openStep.name)
+        if (launch.packageName == null) {
+            onComplete(launch.message)
+            return
+        }
+
+        val service = CosAccessibilityService.instance
+        if (service == null) {
+            onComplete(
+                "Приложение открылось, но управление экраном недоступно. " +
+                    "Проверь, включена ли служба специальных возможностей Cosmos."
+            )
+            return
+        }
+
+        val handler = Handler(Looper.getMainLooper())
+        val resultMessages = mutableListOf(launch.message)
+        var stepIndex = 1
+        var finished = false
+
+        fun finish(message: String) {
+            if (finished) return
+            finished = true
+            onComplete(message)
+        }
+
+        fun waitForPackage(packageName: String, timeoutMs: Long, done: (Boolean) -> Unit) {
+            val startedAt = SystemClock.uptimeMillis()
+
+            val check = object : Runnable {
+                override fun run() {
+                    if (finished) return
+
+                    val activePackage = service.getActivePackageName()
+                    if (activePackage == packageName ||
+                        activePackage.startsWith("$packageName.")
+                    ) {
+                        handler.postDelayed({ done(true) }, 900)
+                    } else if (SystemClock.uptimeMillis() - startedAt >= timeoutMs) {
+                        done(false)
+                    } else {
+                        handler.postDelayed(this, 250)
+                    }
+                }
+            }
+
+            handler.post(check)
+        }
+
+        fun waitForScreenChange(
+            oldVersion: Long,
+            oldText: String,
+            timeoutMs: Long,
+            done: (Boolean) -> Unit
+        ) {
+            val startedAt = SystemClock.uptimeMillis()
+
+            val check = object : Runnable {
+                override fun run() {
+                    if (finished) return
+
+                    val changed = service.getScreenVersion() > oldVersion ||
+                        service.getScreenText() != oldText
+
+                    if (changed) {
+                        handler.postDelayed({ done(true) }, 350)
+                    } else if (SystemClock.uptimeMillis() - startedAt >= timeoutMs) {
+                        done(false)
+                    } else {
+                        handler.postDelayed(this, 250)
+                    }
+                }
+            }
+
+            handler.postDelayed(check, 180)
+        }
+
+        lateinit var runNext: () -> Unit
+
+        runNext = {
+            if (finished) {
+                Unit
+            } else if (stepIndex >= steps.size) {
+                finish("Готово. ${resultMessages.joinToString(" ")}")
+            } else {
+                when (val step = steps[stepIndex]) {
+                    is AutomationStep.OpenApp -> {
+                        // В нормальной последовательности приложение открывается первым.
+                        stepIndex++
+                        runNext()
+                    }
+
+                    is AutomationStep.ClickAny -> {
+                        val dangerousWords = listOf(
+                            "отправить", "удалить", "оплатить", "купить",
+                            "перевести", "опубликовать", "подтвердить",
+                            "заказать", "платёж", "платеж"
+                        )
+
+                        val dangerousTarget = step.targets.any { target ->
+                            dangerousWords.any { word ->
+                                target.contains(word, ignoreCase = true)
+                            }
+                        }
+
+                        if (dangerousTarget) {
+                            finish(
+                                "Это действие требует отдельного подтверждения. " +
+                                    "Я не нажимаю такую кнопку автоматически."
+                            )
+                        } else {
+                            val beforeVersion = service.getScreenVersion()
+                            val beforeText = service.getScreenText()
+
+                            if (!service.clickAny(step.targets)) {
+                                finish(
+                                    "Не нашёл на экране: ${step.description}. " +
+                                        "Дальше не продолжаю."
+                                )
+                            } else {
+                                waitForScreenChange(
+                                    beforeVersion,
+                                    beforeText,
+                                    5500
+                                ) { changed ->
+                                    if (!changed) {
+                                        finish(
+                                            "Нажатие «${step.description}» выполнено, " +
+                                                "но переход или изменение экрана не подтвердились."
+                                        )
+                                    } else {
+                                        resultMessages.add("Открыл: ${step.description}.")
+                                        stepIndex++
+                                        runNext()
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    is AutomationStep.Search -> {
+                        val searchFieldTapped = service.clickAny(
+                            listOf("поиск", "search")
+                        )
+
+                        if (!searchFieldTapped && !service.hasEditableField()) {
+                            finish("Не нашёл поле поиска. Дальше не продолжаю.")
+                        } else {
+                            handler.postDelayed({
+                                if (!service.enterTextInFocusedField(step.query)) {
+                                    finish("Не удалось ввести запрос «${step.query}».")
+                                } else {
+                                    val beforeVersion = service.getScreenVersion()
+                                    val beforeText = service.getScreenText()
+                                    handler.postDelayed({
+                                        if (!service.submitSearch()) {
+                                            finish("Запрос введён, но не удалось запустить поиск.")
+                                        } else {
+                                            waitForScreenChange(
+                                                beforeVersion,
+                                                beforeText,
+                                                8000
+                                            ) { changed ->
+                                                if (!changed) {
+                                                    finish("Поиск запущен, но результаты на экране не подтвердились.")
+                                                } else {
+                                                    resultMessages.add("Выполнил поиск: ${step.query}.")
+                                                    stepIndex++
+                                                    runNext()
+                                                }
+                                            }
+                                        }
+                                    }, 350)
+                                }
+                            }, if (searchFieldTapped) 450 else 150)
+                        }
+                    }
+                }
+            }
+        }
+
+        waitForPackage(launch.packageName, 9000) { opened ->
+            if (!opened) {
+                finish("Не удалось подтвердить открытие приложения ${openStep.name}.")
+            } else {
+                stepIndex = 1
+                runNext()
+            }
+        }
+    }
+
+    private data class AppLaunchResult(
+        val message: String,
+        val packageName: String?
+    )
+
+    private fun parseAutomationSteps(command: String): List<AutomationStep>? {
+        val text = command.lowercase()
+            .replace('ё', 'е')
+            .replace(Regex("[.!?;]"), " ")
+            .replace(Regex("\\s+"), " ")
+            .trim()
+
+        val opening = Regex(
+            "^(?:открой(?: приложение)?|запусти(?: приложение)?|зайди (?:в|на)|перейди (?:в|на))\\s+(.+?)(?:\\s*,\\s*|\\s+(?:и|потом|затем|после этого)\\s+)(.+)$"
+        ).find(text) ?: return null
+
+        val appName = opening.groupValues[1].trim()
+        val remainder = opening.groupValues[2].trim()
+        if (appName.isBlank() || remainder.isBlank()) return null
+
+        val clauses = remainder.split(
+            Regex(",\\s*|\\s+(?:и|потом|затем|после этого)\\s+(?=(?:зайди|перейди|открой|найди|поищи|включи|нажми|введи))")
+        ).map { it.trim() }.filter { it.isNotBlank() }
+
+        if (clauses.isEmpty()) return null
+
+        val steps = mutableListOf<AutomationStep>()
+        steps.add(AutomationStep.OpenApp(appName))
+
+        for (clause in clauses) {
+            when {
+                clause.startsWithAny(
+                    "зайди в мои треки",
+                    "перейди в мои треки",
+                    "открой мои треки",
+                    "зайди в музыку",
+                    "открой музыку"
+                ) -> {
+                    steps.add(
+                        AutomationStep.ClickAny(
+                            listOf("мои треки", "моя музыка", "музыка", "мои аудиозаписи"),
+                            "раздел «Мои треки»"
+                        )
+                    )
+                }
+
+                clause.startsWithAny("найди ", "поищи ", "найди товар ", "поищи товар ") -> {
+                    val query = clause
+                        .removePrefixIgnoreCase("найди товар ")
+                        .removePrefixIgnoreCase("поищи товар ")
+                        .removePrefixIgnoreCase("найди ")
+                        .removePrefixIgnoreCase("поищи ")
+                        .trim()
+
+                    if (query.isBlank()) return null
+                    steps.add(AutomationStep.Search(query))
+                }
+
+                clause.startsWith("включи радио") ||
+                    clause.startsWith("запусти радио") -> {
+                    steps.add(
+                        AutomationStep.ClickAny(
+                            listOf("включить радио", "воспроизвести", "слушать", "play", "пуск", "▶", "радио"),
+                            "запуск радио"
+                        )
+                    )
+                }
+
+                clause.startsWith("включи ") -> {
+                    val target = clause
+                        .removePrefixIgnoreCase("включи ")
+                        .removePrefixIgnoreCase("трек ")
+                        .removePrefixIgnoreCase("песню ")
+                        .removePrefixIgnoreCase("песню ")
+                        .removeSuffix(" трек")
+                        .trim()
+
+                    if (target.isBlank()) return null
+                    steps.add(AutomationStep.ClickAny(listOf(target), "трек «$target»"))
+                }
+
+                clause.startsWithAny("зайди в ", "перейди в ", "открой раздел ", "покажи раздел ") -> {
+                    val target = clause
+                        .removePrefixIgnoreCase("зайди в ")
+                        .removePrefixIgnoreCase("перейди в ")
+                        .removePrefixIgnoreCase("открой раздел ")
+                        .removePrefixIgnoreCase("покажи раздел ")
+                        .trim()
+
+                    if (target.isBlank()) return null
+                    steps.add(AutomationStep.ClickAny(listOf(target), target))
+                }
+
+                clause.startsWithAny("нажми ", "нажми кнопку ") -> {
+                    val target = clause
+                        .removePrefixIgnoreCase("нажми кнопку ")
+                        .removePrefixIgnoreCase("нажми ")
+                        .trim()
+
+                    if (target.isBlank()) return null
+                    steps.add(AutomationStep.ClickAny(listOf(target), target))
+                }
+
+                else -> return null
+            }
+        }
+
+        return steps.takeIf { it.size >= 2 }
+    }
 
     fun execute(context: Context, command: String): String? {
         val original = command.trim()
@@ -899,54 +1234,73 @@ object CosCommandExecutor {
 
     // ЗАПУСК ПРИЛОЖЕНИЙ
 
-    private fun openApp(context: Context, requestedName: String): String {
+    private fun openApp(context: Context, requestedName: String): String =
+        launchApp(context, requestedName).message
+
+    private fun launchApp(context: Context, requestedName: String): AppLaunchResult {
         val name = normalize(requestedName)
 
-        if (name.isBlank()) return "Какое приложение открыть?"
+        if (name.isBlank()) {
+            return AppLaunchResult("Какое приложение открыть?", null)
+        }
 
         return try {
             val pm = context.packageManager
-
             val apps = pm.getInstalledApplications(0)
                 .filter { pm.getLaunchIntentForPackage(it.packageName) != null }
 
-            val aliases = appAliases(name).map { normalize(it) }
+            val aliases = (appAliases(name) + name)
+                .map { normalize(it) }
+                .filter { it.isNotBlank() }
+                .distinct()
+
+            fun compact(value: String): String =
+                normalize(value).replace(" ", "")
 
             val labeledApps = apps.map { app ->
                 app to normalize(pm.getApplicationLabel(app).toString())
             }
 
             val exactMatch = labeledApps
-                .filter { (_, label) -> label in aliases }
-                .sortedBy { (_, label) -> aliases.indexOf(label) }
+                .filter { (_, label) ->
+                    label in aliases || aliases.any { compact(it) == compact(label) }
+                }
+                .sortedBy { (_, label) ->
+                    aliases.indexOfFirst { it == label || compact(it) == compact(label) }
+                        .let { if (it < 0) Int.MAX_VALUE else it }
+                }
                 .firstOrNull()
 
             val matchingApp = exactMatch?.first ?: run {
                 val partialMatches = labeledApps.filter { (_, label) ->
-                    name.length >= 3 &&
-                        (label.contains(name) || name.contains(label))
+                    aliases.any { alias ->
+                        alias.length >= 3 &&
+                            (label.contains(alias) ||
+                                alias.contains(label) ||
+                                compact(label).contains(compact(alias)) ||
+                                compact(alias).contains(compact(label)))
+                    }
                 }
 
-                if (partialMatches.size == 1) {
-                    partialMatches.first().first
-                } else {
-                    null
-                }
+                if (partialMatches.size == 1) partialMatches.first().first else null
             }
 
             if (matchingApp == null) {
-                return "Не нашёл приложение $requestedName."
+                return AppLaunchResult("Не нашёл приложение $requestedName.", null)
             }
 
             val intent = pm.getLaunchIntentForPackage(matchingApp.packageName)
-                ?: return "Не удалось открыть $requestedName."
+                ?: return AppLaunchResult("Не удалось открыть $requestedName.", null)
 
             intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             context.startActivity(intent)
 
-            "Открываю ${pm.getApplicationLabel(matchingApp)}."
+            AppLaunchResult(
+                "Открываю ${pm.getApplicationLabel(matchingApp)}.",
+                matchingApp.packageName
+            )
         } catch (_: Exception) {
-            "Не удалось открыть $requestedName."
+            AppLaunchResult("Не удалось открыть $requestedName.", null)
         }
     }
 
@@ -1003,7 +1357,7 @@ object CosCommandExecutor {
                 listOf("сообщения", "messages", "google messages")
 
             "почта", "гугл почта", "gmail" ->
-                listOf("gmail", "google mail", "гугл почта")
+                listOf("gmail", "google mail", "гугл почта", "почта")
 
             "файлы", "мои файлы" ->
                 listOf("файлы", "files", "мои файлы", "file manager")
@@ -1024,7 +1378,7 @@ object CosCommandExecutor {
                 listOf("guitartuna", "guitar tuna")
 
             "offradio", "оффрадио" ->
-                listOf("offradio", "оффрадио")
+                listOf("offradio", "off radio", "оффрадио", "офф радио")
 
             "deepseek", "дипсик", "дип сик" ->
                 listOf("deepseek", "дипсик")
