@@ -196,7 +196,7 @@ class CosAccessibilityService : AccessibilityService() {
             ?: return false
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            if (field.performAction(AccessibilityNodeInfo.ACTION_IME_ENTER)) {
+            if (field.performAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_IME_ENTER.id)) {
                 return true
             }
         }
