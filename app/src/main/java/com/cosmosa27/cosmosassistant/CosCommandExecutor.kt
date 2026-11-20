@@ -94,27 +94,6 @@ object CosCommandExecutor {
 
             // УВЕДОМЛЕНИЯ
 
-    private fun readNotifications(): String {
-        val items = CosNotificationService.latestNotifications.take(5)
-
-        if (items.isEmpty()) {
-            return "Новых уведомлений пока нет. Проверь, разрешён ли доступ к уведомлениям."
-        }
-
-        return "Последние уведомления. " + items.joinToString(". ")
-    }
-
-    private fun openNotificationAccessSettings(context: Context): String {
-        return try {
-            val intent = Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS).apply {
-                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            }
-            context.startActivity(intent)
-            "Открываю настройки доступа к уведомлениям."
-        } catch (_: Exception) {
-            "Не удалось открыть настройки уведомлений."
-        }
-    }
     // ЯРКОСТЬ ЭКРАНА
 
             text in listOf("ярче", "увеличь яркость", "сделай ярче", "яркость выше") ->
@@ -279,100 +258,6 @@ object CosCommandExecutor {
                 openMap(context, place)
             }
 
-            // УВЕДОМЛЕНИЯ
-
-    private fun readNotifications(): String {
-        val items = CosNotificationService.latestNotifications.take(5)
-
-        if (items.isEmpty()) {
-            return "Новых уведомлений пока нет. Проверь, разрешён ли доступ к уведомлениям."
-        }
-
-        return "Последние уведомления. " + items.joinToString(". ")
-    }
-
-    private fun openNotificationAccessSettings(context: Context): String {
-        return try {
-            val intent = Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS).apply {
-                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            }
-            context.startActivity(intent)
-            "Открываю настройки доступа к уведомлениям."
-        } catch (_: Exception) {
-            "Не удалось открыть настройки уведомлений."
-        }
-    }
-    // ЯРКОСТЬ ЭКРАНА
-
-    private fun changeBrightness(context: Context, direction: Int): String {
-        if (!Settings.System.canWrite(context)) {
-            val intent = Intent(
-                Settings.ACTION_MANAGE_WRITE_SETTINGS,
-                Uri.parse("package:${context.packageName}")
-            ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            context.startActivity(intent)
-            return "Разреши Космосу изменять системные настройки, затем повтори команду."
-        }
-
-        return try {
-            val current = Settings.System.getInt(
-                context.contentResolver,
-                Settings.System.SCREEN_BRIGHTNESS,
-                128
-            )
-
-            val value = when (direction) {
-                1 -> (current + 26).coerceAtMost(255)
-                -1 -> (current - 26).coerceAtLeast(5)
-                2 -> 255
-                -2 -> 5
-                else -> current
-            }
-
-            Settings.System.putInt(
-                context.contentResolver,
-                Settings.System.SCREEN_BRIGHTNESS,
-                value
-            )
-
-            "Яркость изменена."
-        } catch (_: Exception) {
-            "Не удалось изменить яркость экрана."
-        }
-    }
-
-    private fun setBrightnessPercent(context: Context, command: String): String {
-        val match = Regex("(\\d{1,3})").find(command)
-            ?: return "Назови яркость в процентах."
-
-        val percent = match.value.toIntOrNull()
-            ?: return "Не удалось распознать процент."
-
-        if (percent !in 1..100) {
-            return "Укажи значение от 1 до 100 процентов."
-        }
-
-        if (!Settings.System.canWrite(context)) {
-            val intent = Intent(
-                Settings.ACTION_MANAGE_WRITE_SETTINGS,
-                Uri.parse("package:${context.packageName}")
-            ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            context.startActivity(intent)
-            return "Разреши Космосу изменять системные настройки, затем повтори команду."
-        }
-
-        return try {
-            val value = (percent * 255 / 100).coerceAtLeast(1)
-            Settings.System.putInt(
-                context.contentResolver,
-                Settings.System.SCREEN_BRIGHTNESS,
-                value
-            )
-            "Установлена яркость $percent процентов."
-        } catch (_: Exception) {
-            "Не удалось изменить яркость экрана."
-        }
-    }
     // ТАЙМЕР
 
             text.startsWithAny(
