@@ -4,18 +4,17 @@ package com.cosmosa27.cosmosassistant
 import android.Manifest
 import android.app.Activity
 import android.content.Intent
-import android.net.Uri
+import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
+import android.net.Uri
 import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.TextView
 import android.widget.Toast
 
 class MainActivity : Activity() {
-
-    private val modelRequestCode = 1001
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -27,27 +26,11 @@ class MainActivity : Activity() {
 
         layout.addView(TextView(this).apply {
             text = "COSMOS ASSISTANT\n\n" +
-                "Локальная модель Qwen позволит помощнику " +
-                "работать без облачных AI-сервисов.\n\n" +
-                "Выбери GGUF-файл модели. Это потребуется только один раз."
+                "Твой голосовой помощник.\n\n" +
+                "Скажи «Космос», чтобы обратиться к помощнику."
             textSize = 18f
         })
 
-        // Выбор файла модели
-        layout.addView(Button(this).apply {
-            text = "Выбрать модель Qwen GGUF"
-
-            setOnClickListener {
-                val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
-                    addCategory(Intent.CATEGORY_OPENABLE)
-                    type = "*/*"
-                }
-
-                startActivityForResult(intent, modelRequestCode)
-            }
-        })
-
-        // Разрешение отображения шара
         layout.addView(Button(this).apply {
             text = "Разрешить отображение поверх приложений"
 
@@ -65,7 +48,6 @@ class MainActivity : Activity() {
             }
         })
 
-        // Запуск помощника
         layout.addView(Button(this).apply {
             text = "Запустить / показать шар"
 
@@ -74,7 +56,6 @@ class MainActivity : Activity() {
             }
         })
 
-        // Остановка помощника
         layout.addView(Button(this).apply {
             text = "Убрать шар"
 
@@ -87,49 +68,33 @@ class MainActivity : Activity() {
 
         setContentView(layout)
 
-        if (Build.VERSION.SDK_INT >= 33) {
-            requestPermissions(
-                arrayOf(Manifest.permission.POST_NOTIFICATIONS),
-                10
-            )
-        }
-
-        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) !=
-            android.content.pm.PackageManager.PERMISSION_GRANTED
-        ) {
-            requestPermissions(
-                arrayOf(Manifest.permission.RECORD_AUDIO),
-                11
-            )
-        }
+        requestMissingPermissions()
     }
 
-    @Deprecated("Используется системный выбор файла модели")
-    override fun onActivityResult(
-        requestCode: Int,
-        resultCode: Int,
-        data: Intent?
-    ) {
-        super.onActivityResult(requestCode, resultCode, data)
+    private fun requestMissingPermissions() {
+        val permissions = mutableListOf<String>()
 
-        if (requestCode == modelRequestCode && resultCode == RESULT_OK) {
-            val uri = data?.data ?: return
+        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) !=
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            permissions.add(Manifest.permission.RECORD_AUDIO)
+        }
 
-            Toast.makeText(
-                this,
-                "Начинаю копирование и загрузку Qwen. Подожди...",
-                Toast.LENGTH_LONG
-            ).show()
+        if (checkSelfPermission(Manifest.permission.READ_CONTACTS) !=
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            permissions.add(Manifest.permission.READ_CONTACTS)
+        }
 
-            QwenAssistant.importAndLoad(this, uri) { success, message ->
+        if (Build.VERSION.SDK_INT >= 33 &&
+            checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) !=
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            permissions.add(Manifest.permission.POST_NOTIFICATIONS)
+        }
 
-                Toast.makeText(
-                    this,
-                    message,
-                    Toast.LENGTH_LONG
-                ).show()
-
-            }
+        if (permissions.isNotEmpty()) {
+            requestPermissions(permissions.toTypedArray(), 12)
         }
     }
 
@@ -145,7 +110,7 @@ class MainActivity : Activity() {
         }
 
         if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) !=
-            android.content.pm.PackageManager.PERMISSION_GRANTED
+            PackageManager.PERMISSION_GRANTED
         ) {
             Toast.makeText(
                 this,

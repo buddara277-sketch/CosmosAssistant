@@ -75,7 +75,7 @@ class OverlayService : Service(), TextToSpeech.OnInitListener {
         startWakeWordListening()
     }
 
-    private val speechTimeout = Runnable {
+        private val speechTimeout = Runnable {
         if (listening) {
             val wasWakeRecognition = activeWakeRecognition
 
@@ -87,7 +87,10 @@ class OverlayService : Service(), TextToSpeech.OnInitListener {
             } catch (_: Exception) {
             }
 
-            playTone(false)
+            // В фоновом режиме ожидания не подаём сигнал окончания.
+            if (!wasWakeRecognition) {
+                playTone(false)
+            }
 
             if (wasWakeRecognition) {
                 scheduleWakeListening(1200)
@@ -100,18 +103,6 @@ class OverlayService : Service(), TextToSpeech.OnInitListener {
 
                 scheduleWakeListening(800)
             }
-        }
-    }
-
-    private val commandTimeout = Runnable {
-        if (commandInProgress) {
-            // Сначала прерываем саму генерацию Qwen.
-            QwenAssistant.cancelCurrentGeneration()
-
-            commandInProgress = false
-            commandSession++
-
-            speak("Кос слишком долго выполнял команду. Попробуй ещё раз.")
         }
     }
 
@@ -143,7 +134,6 @@ class OverlayService : Service(), TextToSpeech.OnInitListener {
 
         showOrb()
 
-        QwenAssistant.loadSaved(this)
 
         // Запускаем ожидание ключевого слова после создания сервиса.
         scheduleWakeListening(1800)
@@ -526,7 +516,7 @@ class OverlayService : Service(), TextToSpeech.OnInitListener {
     }
 
     // ---------------------------------------------------------
-    // КОМАНДЫ QWEN
+    // ВЫПОЛНЕНИЕ КОМАНД
     // ---------------------------------------------------------
 
     private fun runCommand(command: String) {
@@ -548,39 +538,20 @@ class OverlayService : Service(), TextToSpeech.OnInitListener {
         }
 
         commandInProgress = true
-        val currentSession = ++commandSession
-
-        handler.removeCallbacks(commandTimeout)
-        handler.postDelayed(commandTimeout, 90000)
+        commandSession++
 
         try {
-            QwenAssistant.ask(this, command) { response ->
+            val response = CosCommandExecutor.execute(this, command)
+                ?: "Не понял команду. Попробуй сказать иначе."
 
-                handler.post {
-                    if (destroyed || currentSession != commandSession) {
-                        return@post
-                    }
+            commandInProgress = false
+            speak(response)
 
-                    commandInProgress = false
-                    handler.removeCallbacks(commandTimeout)
-
-                    if (response.isNotBlank()) {
-                        speak(response)
-                    } else {
-                        scheduleWakeListening(700)
-                    }
-                }
-            }
         } catch (_: Exception) {
-            if (currentSession == commandSession) {
-                commandInProgress = false
-                handler.removeCallbacks(commandTimeout)
-
-                speak("Не удалось выполнить команду.")
-            }
+            commandInProgress = false
+            speak("Не удалось выполнить команду.")
         }
     }
-
     // ---------------------------------------------------------
     // УПРАВЛЕНИЕ МУЗЫКОЙ И ОЗВУЧИВАНИЕМ
     // ---------------------------------------------------------
@@ -701,6 +672,11 @@ class OverlayService : Service(), TextToSpeech.OnInitListener {
         if (destroyed || commandInProgress) return
 
         handler.removeCallbacks(wakeRestartRunnable)
+
+        // Останавливаем фоновое ожидание ключевого слова.
+        if (listening && activeWakeRecognition) {
+            cancelCurrentRecognition()
+        }
 
         if (ttsSpeaking) {
             try {
@@ -926,27 +902,29 @@ class OverlayService : Service(), TextToSpeech.OnInitListener {
             session == speechSession
     }
 
-    private fun finishListening(session: Int) {
-        if (session != speechSession || !listening) return
-
-        listening = false
-
+        private fun cancelCurrentRecognition() {
         handler.removeCallbacks(speechTimeout)
 
-        playTone(false)
-    }
-
-    private fun cancelCurrentRecognition() {
-        if (!listening) return
-
-        listening = false
         speechSession++
-
-        handler.removeCallbacks(speechTimeout)
+        listening = false
 
         try {
             speech?.cancel()
         } catch (_: Exception) {
+        }
+    }
+    private fun finishListening(session: Int) {
+        if (session != speechSession || !listening) return
+
+        val wasWakeRecognition = activeWakeRecognition
+
+        listening = false
+
+        handler.removeCallbacks(speechTimeout)
+
+        // Сигнал окончания только после обычного прослушивания команды.
+        if (!wasWakeRecognition) {
+            playTone(false)
         }
     }
 
