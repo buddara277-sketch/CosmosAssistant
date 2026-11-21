@@ -541,7 +541,9 @@ class OverlayService : Service(), TextToSpeech.OnInitListener {
         val currentCommandSession = ++commandSession
 
         try {
-            CosCommandExecutor.executeSequence(this, command) { result ->
+            // Единый голосовой маршрут: простые команды обработает Kotlin,
+            // сложные Qwen спланирует и передаст исполнителю через CosToolRouter.
+            QwenAssistant.ask(this, command) { result ->
                 handler.post {
                     if (destroyed || currentCommandSession != commandSession) {
                         return@post

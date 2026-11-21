@@ -2,6 +2,7 @@
 package com.cosmosa27.cosmosassistant
 
 import android.Manifest
+import android.accessibilityservice.AccessibilityService
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -21,6 +22,9 @@ object CosCommandExecutor {
         data class OpenApp(val name: String) : AutomationStep()
         data class ClickAny(val targets: List<String>, val description: String) : AutomationStep()
         data class Search(val query: String) : AutomationStep()
+        data class TypeText(val text: String) : AutomationStep()
+        data class Scroll(val forward: Boolean) : AutomationStep()
+        data object Back : AutomationStep()
     }
 
     /**
@@ -42,30 +46,32 @@ object CosCommandExecutor {
             return
         }
 
-        val openStep = steps.first() as? AutomationStep.OpenApp
-        if (openStep == null) {
-            onComplete("Не удалось определить приложение для этой последовательности.")
-            return
-        }
-
-        val launch = launchApp(context, openStep.name)
-        if (launch.packageName == null) {
-            onComplete(launch.message)
-            return
-        }
-
+        val openStep = steps.firstOrNull() as? AutomationStep.OpenApp
         val service = CosAccessibilityService.instance
         if (service == null) {
             onComplete(
-                "Приложение открылось, но управление экраном недоступно. " +
-                    "Проверь, включена ли служба специальных возможностей Cosmos."
+                "Управление экраном недоступно. Проверь, включена ли служба специальных возможностей Cosmos."
             )
+            return
+        }
+
+        val launch = if (openStep != null) {
+            launchApp(context, openStep.name)
+        } else {
+            val activePackage = service.getActivePackageName()
+            AppLaunchResult(
+                "Продолжаю работу в открытом приложении.",
+                activePackage.takeIf { it.isNotBlank() }
+            )
+        }
+        if (launch.packageName == null) {
+            onComplete(launch.message.ifBlank { "Не удалось определить открытое приложение." })
             return
         }
 
         val handler = Handler(Looper.getMainLooper())
         val resultMessages = mutableListOf(launch.message)
-        var stepIndex = 1
+        var stepIndex = if (openStep != null) 1 else 0
         var finished = false
 
         fun finish(message: String) {
@@ -225,17 +231,62 @@ object CosCommandExecutor {
                             }, if (searchFieldTapped) 450 else 150)
                         }
                     }
+                    is AutomationStep.TypeText -> {
+                        if (step.text.isBlank()) {
+                            finish("Не получил текст для ввода.")
+                        } else if (!service.enterTextInFocusedField(step.text)) {
+                            finish("Не нашёл активное поле для ввода текста.")
+                        } else {
+                            resultMessages.add("Ввёл текст.")
+                            stepIndex++
+                            handler.postDelayed({ runNext() }, 250)
+                        }
+                    }
+
+                    is AutomationStep.Scroll -> {
+                        val moved = if (step.forward) service.scrollForward() else service.scrollBackward()
+                        if (!moved) {
+                            finish("Не удалось прокрутить текущий экран.")
+                        } else {
+                            resultMessages.add(if (step.forward) "Прокрутил вниз." else "Прокрутил вверх.")
+                            stepIndex++
+                            handler.postDelayed({ runNext() }, 450)
+                        }
+                    }
+
+                    AutomationStep.Back -> {
+                        val beforeVersion = service.getScreenVersion()
+                        val beforeText = service.getScreenText()
+                        val wentBack = service.performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK)
+                        if (!wentBack) {
+                            finish("Не удалось выполнить действие «назад».")
+                        } else {
+                            waitForScreenChange(beforeVersion, beforeText, 4000) { changed ->
+                                if (!changed) {
+                                    finish("Команду «назад» отправил, но изменение экрана не подтвердилось.")
+                                } else {
+                                    resultMessages.add("Вернулся на предыдущий экран.")
+                                    stepIndex++
+                                    runNext()
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
 
-        waitForPackage(launch.packageName, 9000) { opened ->
-            if (!opened) {
-                finish("Не удалось подтвердить открытие приложения ${openStep.name}.")
-            } else {
-                stepIndex = 1
-                runNext()
+        if (openStep != null) {
+            waitForPackage(launch.packageName, 9000) { opened ->
+                if (!opened) {
+                    finish("Не удалось подтвердить открытие приложения ${openStep.name}.")
+                } else {
+                    stepIndex = 1
+                    runNext()
+                }
             }
+        } else {
+            runNext()
         }
     }
 
@@ -243,6 +294,9 @@ object CosCommandExecutor {
         val message: String,
         val packageName: String?
     )
+
+    fun supportsSequence(command: String): Boolean =
+        (parseAutomationSteps(command)?.size ?: 0) >= 2
 
     private fun parseAutomationSteps(command: String): List<AutomationStep>? {
         val text = command.lowercase()
@@ -253,100 +307,94 @@ object CosCommandExecutor {
 
         val opening = Regex(
             "^(?:открой(?: приложение)?|запусти(?: приложение)?|зайди (?:в|на)|перейди (?:в|на))\\s+(.+?)(?:\\s*,\\s*|\\s+(?:и|потом|затем|после этого)\\s+)(.+)$"
-        ).find(text) ?: return null
+        ).find(text)
 
-        val appName = opening.groupValues[1].trim()
-        val remainder = opening.groupValues[2].trim()
-        if (appName.isBlank() || remainder.isBlank()) return null
+        val appName = opening?.groupValues?.get(1)?.trim()?.takeIf { it.isNotBlank() }
+        val remainder = opening?.groupValues?.get(2)?.trim() ?: text
+        if (remainder.isBlank()) return null
 
         val clauses = remainder.split(
-            Regex(",\\s*|\\s+(?:и|потом|затем|после этого)\\s+(?=(?:зайди|перейди|открой|найди|поищи|включи|нажми|введи))")
-        ).map { it.trim() }.filter { it.isNotBlank() }
-
+            Regex(",\\s*|\\s+(?:и|потом|затем|после этого)\\s+(?=(?:зайди|перейди|открой|найди|поищи|включи|нажми|введи|прокрути|вернись|назад))")
+        ).map { clause ->
+            clause.trim()
+                .removePrefixIgnoreCase("затем ")
+                .removePrefixIgnoreCase("потом ")
+                .removePrefixIgnoreCase("после этого ")
+        }.filter { it.isNotBlank() }
         if (clauses.isEmpty()) return null
 
         val steps = mutableListOf<AutomationStep>()
-        steps.add(AutomationStep.OpenApp(appName))
+        if (appName != null) steps.add(AutomationStep.OpenApp(appName))
 
         for (clause in clauses) {
             when {
-                clause.startsWithAny(
-                    "зайди в мои треки",
-                    "перейди в мои треки",
-                    "открой мои треки",
-                    "зайди в музыку",
-                    "открой музыку"
-                ) -> {
-                    steps.add(
-                        AutomationStep.ClickAny(
-                            listOf("мои треки", "моя музыка", "музыка", "мои аудиозаписи"),
-                            "раздел «Мои треки»"
-                        )
-                    )
-                }
+                clause.startsWithAny("зайди в мои треки", "перейди в мои треки", "открой мои треки", "зайди в музыку", "открой музыку", "перейди в музыку") ->
+                    steps.add(AutomationStep.ClickAny(
+                        listOf("мои треки", "моя музыка", "музыка", "мои аудиозаписи", "music"),
+                        "раздел «Моя музыка»"
+                    ))
 
-                clause.startsWithAny("найди ", "поищи ", "найди товар ", "поищи товар ") -> {
-                    val query = clause
-                        .removePrefixIgnoreCase("найди товар ")
-                        .removePrefixIgnoreCase("поищи товар ")
-                        .removePrefixIgnoreCase("найди ")
-                        .removePrefixIgnoreCase("поищи ")
-                        .trim()
-
+                clause.startsWithAny("найди ", "поищи ", "найди товар ", "поищи товар ", "выполни поиск ") -> {
+                    val query = clause.removePrefixIgnoreCase("выполни поиск ")
+                        .removePrefixIgnoreCase("найди товар ").removePrefixIgnoreCase("поищи товар ")
+                        .removePrefixIgnoreCase("найди ").removePrefixIgnoreCase("поищи ").trim()
                     if (query.isBlank()) return null
                     steps.add(AutomationStep.Search(query))
                 }
 
-                clause.startsWith("включи радио") ||
-                    clause.startsWith("запусти радио") -> {
-                    steps.add(
-                        AutomationStep.ClickAny(
-                            listOf("включить радио", "воспроизвести", "слушать", "play", "пуск", "▶", "радио"),
-                            "запуск радио"
-                        )
-                    )
+                clause.startsWithAny("включи радио", "запусти радио") ->
+                    steps.add(AutomationStep.ClickAny(
+                        listOf("включить радио", "воспроизвести", "слушать", "play", "пуск", "▶", "радио"),
+                        "запуск радио"
+                    ))
+
+                clause.startsWithAny("включи ", "запусти воспроизведение", "воспроизведи ") -> {
+                    val target = clause.removePrefixIgnoreCase("включи ")
+                        .removePrefixIgnoreCase("воспроизведи ")
+                        .removePrefixIgnoreCase("трек ").removePrefixIgnoreCase("песню ")
+                        .trim()
+                    if (target.isBlank()) {
+                        steps.add(AutomationStep.ClickAny(listOf("play", "воспроизвести", "▶", "пуск"), "воспроизведение"))
+                    } else steps.add(AutomationStep.ClickAny(listOf(target, "play", "воспроизвести"), "трек «$target»"))
                 }
 
-                clause.startsWith("включи ") -> {
-                    val target = clause
-                        .removePrefixIgnoreCase("включи ")
-                        .removePrefixIgnoreCase("трек ")
-                        .removePrefixIgnoreCase("песню ")
-                        .removePrefixIgnoreCase("песню ")
-                        .removeSuffix(" трек")
-                        .trim()
-
-                    if (target.isBlank()) return null
-                    steps.add(AutomationStep.ClickAny(listOf(target), "трек «$target»"))
-                }
-
-                clause.startsWithAny("зайди в ", "перейди в ", "открой раздел ", "покажи раздел ") -> {
-                    val target = clause
-                        .removePrefixIgnoreCase("зайди в ")
-                        .removePrefixIgnoreCase("перейди в ")
-                        .removePrefixIgnoreCase("открой раздел ")
-                        .removePrefixIgnoreCase("покажи раздел ")
-                        .trim()
-
+                clause.startsWithAny("зайди в ", "перейди в ", "открой раздел ", "покажи раздел ", "открой вкладку ") -> {
+                    val target = clause.removePrefixIgnoreCase("зайди в ").removePrefixIgnoreCase("перейди в ")
+                        .removePrefixIgnoreCase("открой раздел ").removePrefixIgnoreCase("покажи раздел ")
+                        .removePrefixIgnoreCase("открой вкладку ").trim()
                     if (target.isBlank()) return null
                     steps.add(AutomationStep.ClickAny(listOf(target), target))
                 }
 
-                clause.startsWithAny("нажми ", "нажми кнопку ") -> {
-                    val target = clause
-                        .removePrefixIgnoreCase("нажми кнопку ")
-                        .removePrefixIgnoreCase("нажми ")
-                        .trim()
-
+                clause.startsWithAny("нажми ", "нажми кнопку ", "выбери ", "открой пункт ") -> {
+                    val target = clause.removePrefixIgnoreCase("нажми кнопку ").removePrefixIgnoreCase("нажми ")
+                        .removePrefixIgnoreCase("выбери ").removePrefixIgnoreCase("открой пункт ").trim()
                     if (target.isBlank()) return null
                     steps.add(AutomationStep.ClickAny(listOf(target), target))
                 }
+
+                clause.startsWithAny("введи текст ", "напечатай ", "введи ") -> {
+                    val value = clause.removePrefixIgnoreCase("введи текст ").removePrefixIgnoreCase("напечатай ")
+                        .removePrefixIgnoreCase("введи ").substringBefore(" в поле ")
+                        .trim().trim('"', '«', '»')
+                    if (value.isBlank()) return null
+                    steps.add(AutomationStep.TypeText(value))
+                }
+
+                clause.startsWithAny("прокрути вниз", "пролистай вниз", "листани вниз") ->
+                    steps.add(AutomationStep.Scroll(true))
+
+                clause.startsWithAny("прокрути вверх", "пролистай вверх", "листани вверх") ->
+                    steps.add(AutomationStep.Scroll(false))
+
+                clause == "назад" || clause.startsWith("вернись назад") || clause.startsWith("вернись на предыдущий экран") ->
+                    steps.add(AutomationStep.Back)
 
                 else -> return null
             }
         }
 
-        return steps.takeIf { it.size >= 2 }
+        return steps.takeIf { it.size in 2..7 }
     }
 
     fun execute(context: Context, command: String): String? {
@@ -373,6 +421,9 @@ object CosCommandExecutor {
 
             text in listOf("максимальная громкость", "громкость на максимум", "звук на максимум", "сделай максимальную громкость") ->
                 setMaximumVolume(context)
+
+            Regex("^громкость\\s+\\d{1,3}\\s*(?:процентов|процента|процент|%)?$").matches(text) ->
+                setVolumePercent(context, text)
 
             // МУЗЫКА
 
@@ -828,6 +879,29 @@ object CosCommandExecutor {
             "Устанавливаю максимальную громкость."
         } catch (_: Exception) {
             "Не удалось изменить громкость."
+        }
+    }
+
+
+    private fun setVolumePercent(context: Context, command: String): String {
+        return try {
+            val percent = Regex("\\d{1,3}").find(command)?.value?.toIntOrNull()
+                ?: return "Назови громкость от 0 до 100 процентов."
+            if (percent !in 0..100) return "Громкость должна быть от 0 до 100 процентов."
+
+            val audio = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+            val maxVolume = audio.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
+            val targetVolume = (maxVolume * percent / 100f).toInt().coerceIn(0, maxVolume)
+            audio.setStreamVolume(
+                AudioManager.STREAM_MUSIC,
+                targetVolume,
+                AudioManager.FLAG_SHOW_UI
+            )
+            "Устанавливаю громкость на $percent процентов."
+        } catch (_: SecurityException) {
+            "Система не разрешила изменить громкость."
+        } catch (_: Exception) {
+            "Не удалось установить громкость."
         }
     }
 

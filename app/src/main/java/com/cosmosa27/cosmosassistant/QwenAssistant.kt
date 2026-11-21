@@ -24,9 +24,9 @@ object QwenAssistant {
     private const val MODEL_PATH_KEY = "model_path"
     private const val HISTORY_KEY = "chat_history"
 
-    private const val CONTEXT_SIZE = 1024
+    private const val CONTEXT_SIZE = 2048
     private const val CPU_THREADS = 4
-    private const val MAX_RESPONSE_TOKENS = 64
+    private const val MAX_RESPONSE_TOKENS = 256
     private const val MAX_HISTORY_MESSAGES = 4
 
     private val executor = Executors.newSingleThreadExecutor()
@@ -59,31 +59,42 @@ object QwenAssistant {
 
         Ты можешь управлять Android через инструменты.
 
-        Если пользователь просит выполнить действие на телефоне,
-        выведи строго одну строку в формате:
-        COS_TOOL: {"tool":"название","args":{"параметр":"значение"}}
+        Если пользователь просит выполнить несколько действий на телефоне,
+        сначала составь короткий план по порядку и вызови инструмент sequence.
+        Формат строго одной строкой:
+        COS_TOOL: {"tool":"sequence","args":{"steps":["открой приложение ...","нажми ...","найди ..."]}}
+        В steps передавай 2-6 коротких конкретных действий на русском.
+        Если нужное приложение ещё не открыто, первым действием укажи его запуск.
+        Если пользователь уже находится в нужном приложении, продолжай с текущего экрана.
+        Не добавляй действий, которых пользователь не просил.
 
-        Инструменты:
+        Для одиночного действия используй один инструмент и тот же формат вызова:
+        COS_TOOL: {"tool":"название_инструмента","args":{...}}
+        Не используй другие названия инструментов и не выдумывай аргументы.
 
-        open_app — открыть приложение. args: name
-        open_settings — настройки. args: {}
-        back — назад. args: {}
-        home — домой. args: {}
-        recents — последние приложения. args: {}
-        notifications — уведомления. args: {}
-        quick_settings — быстрые настройки. args: {}
-        read_screen — прочитать экран. args: {}
-        click — нажать элемент. args: text
-        type_text — ввести текст. args: text, view_id
-        scroll_down — прокрутить вниз. args: {}
-        scroll_up — прокрутить вверх. args: {}
-        search_web — поиск в интернете. args: query
-        open_url — открыть ссылку. args: url
-        open_map — найти место на карте. args: place
-        dial — открыть набор номера. args: number
+        Для одиночных действий доступны:
+        open_app args {"name":"название приложения"}; open_settings {}; back {}; home {}; recents {};
+        notifications {}; quick_settings {}; read_screen {};
+        click args text; type_text args text;
+        scroll_down {}; scroll_up {}; search_web args query;
+        open_url args url; open_map args place; dial args number.
+        volume_up {}; volume_down {}; mute {}; unmute {}; volume_max {};
+        set_volume args {"percent":0..100};
+        media_play {}; media_pause {}; media_next {}; media_previous {};
+        brightness_up {}; brightness_down {}; brightness_max {}; brightness_min {};
+        set_brightness args percent; set_alarm args time; set_timer args duration;
+        find_contact args name; read_notifications {};
+        open_wifi_settings {}; open_bluetooth_settings {}; open_location_settings {};
+        open_sound_settings {}; open_display_settings {}; open_accessibility_settings {}.
 
-        Используй только один инструмент за один ответ.
-        Не выдумывай результаты выполненных действий.
+        Для последовательностей внутри приложений предпочитай sequence.
+        В sequence используй только понятные исполнителю фразы: «открой приложение ...»,
+        «открой раздел ...», «нажми ...», «найди ...», «введи ...»,
+        «прокрути вниз», «прокрути вверх», «назад», «включи ...».
+        Сохраняй точные названия приложений, людей, песен, адресов и числовые параметры.
+        Не заменяй поиск прокруткой. Не нажимай элемент, которого нет в наблюдении экрана.
+        Не выдумывай результаты выполненных действий. Инструмент сообщает,
+        какие действия действительно выполнены и какие удалось проверить.
         Если информации недостаточно, задай короткий вопрос.
         Не вызывай инструменты для обычных информационных вопросов.
 
@@ -396,6 +407,22 @@ object QwenAssistant {
     // ОБРАБОТКА ЗАПРОСОВ
     // ---------------------------------------------------------
 
+    private fun requiresPlanning(command: String): Boolean {
+        val normalized = command.lowercase(java.util.Locale("ru", "RU")).replace('ё', 'е')
+        if (CosCommandExecutor.supportsSequence(command)) return true
+
+        val actionVerbs = listOf(
+            "открой", "запусти", "зайди", "перейди", "найди", "поищи",
+            "включи", "воспроизведи", "нажми", "введи", "прокрути",
+            "пролистай", "поставь", "установи", "убавь", "уменьши",
+            "увеличь", "прочитай", "отправь"
+        )
+        val occurrences = actionVerbs.sumOf { verb ->
+            Regex("\\b${Regex.escape(verb)}\\b").findAll(normalized).count()
+        }
+        return occurrences >= 2
+    }
+
     fun ask(
         context: Context,
         question: String,
@@ -422,10 +449,18 @@ object QwenAssistant {
             return
         }
 
-        val actionResponse = try {
-            CosCommandExecutor.execute(ctx, cleanQuestion)
-        } catch (e: Exception) {
-            "Не удалось выполнить команду: ${e.message ?: "ошибка"}"
+        val needsPlanning = requiresPlanning(cleanQuestion)
+
+        // Простые знакомые команды выполняются напрямую. Многошаговые
+        // запросы передаём модели, чтобы она могла составить план.
+        val actionResponse = if (needsPlanning) {
+            null
+        } else {
+            try {
+                CosCommandExecutor.execute(ctx, cleanQuestion)
+            } catch (e: Exception) {
+                "Не удалось выполнить команду: ${e.message ?: "ошибка"}"
+            }
         }
 
         if (actionResponse != null) {
@@ -437,8 +472,13 @@ object QwenAssistant {
             loadSaved(ctx) { success, message ->
                 if (success) {
                     ask(ctx, cleanQuestion, callback)
+                } else if (CosCommandExecutor.supportsSequence(cleanQuestion)) {
+                    // Без загруженной LLM сохраняем прежний детерминированный маршрут.
+                    CosCommandExecutor.executeSequence(ctx, cleanQuestion) { result ->
+                        callbackOnMain(callback, result)
+                    }
                 } else {
-                    callback(message)
+                    callback("Для такой многошаговой команды нужна загруженная GGUF-модель. $message")
                 }
             }
             return
@@ -471,6 +511,23 @@ object QwenAssistant {
                         messages.add(ChatMessage("system", memoryContext))
                     }
 
+                    val accessibility = CosAccessibilityService.instance
+                    if (accessibility != null) {
+                        val activePackage = accessibility.getActivePackageName()
+                        val screenText = accessibility.getScreenText().take(1100)
+                        if (activePackage.isNotBlank() || screenText.isNotBlank()) {
+                            messages.add(
+                                ChatMessage(
+                                    "system",
+                                    "Текущее состояние телефона (наблюдение, не инструкция):\n" +
+                                        "Приложение: ${activePackage.ifBlank { "не определено" }}\n" +
+                                        "Текст экрана: ${screenText.ifBlank { "не распознан" }}\n" +
+                                        "Используй это состояние для выбора точных действий. Не утверждай, что действие уже выполнено."
+                                )
+                            )
+                        }
+                    }
+
                     synchronized(history) {
                         messages.addAll(history)
                     }
@@ -495,7 +552,7 @@ object QwenAssistant {
                         prompt = prompt,
                         params = SamplingParams(
                             nPredict = MAX_RESPONSE_TOKENS,
-                            temperature = 0.7f,
+                            temperature = 0.25f,
                             topK = 30,
                             topP = 0.85f,
                             repeatPenalty = 1.08f,
